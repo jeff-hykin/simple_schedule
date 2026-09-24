@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>simple_schedule</title>
+        <link
+            rel="icon"
+            href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>⏱</text></svg>"
+        >
+        <link rel="stylesheet" href="style.css">
+    </head>
+    <body>
+        <div id="shell">
+            <header>
+                <span class="brand">simple_schedule</span>
+                <span class="pill" id="daemon-pill"><span class="dot" id="daemon-dot"></span><span
+                        id="daemon-text"
+                    >connecting…</span></span>
+                <span class="pill" id="install-pill">—</span>
+                <span class="spacer"></span>
+                <button id="new-job-button" title="add a job (n)">+ job</button>
+                <button id="palette-button" title="command palette (ctrl+k)">⌘ palette</button>
+                <button id="help-button" title="keyboard shortcuts (?)">?</button>
+            </header>
+
+            <main>
+                <section id="job-pane" aria-label="jobs">
+                    <div id="filter-row">
+                        <input
+                            id="filter"
+                            type="search"
+                            placeholder="filter jobs  (/)"
+                            aria-label="filter jobs"
+                            autocomplete="off"
+                        >
+                    </div>
+                    <div id="job-list" role="listbox" aria-label="job list" tabindex="0"></div>
+                </section>
+                <section id="detail" aria-live="polite" tabindex="-1"></section>
+            </main>
+
+            <footer>
+                <span><kbd>j</kbd>/<kbd>k</kbd> move</span>
+                <span><kbd>enter</kbd> open</span>
+                <span><kbd>t</kbd> trigger</span>
+                <span><kbd>s</kbd> skip next</span>
+                <span><kbd>e</kbd> edit</span>
+                <span><kbd>l</kbd> logs</span>
+                <span><kbd>r</kbd> runs</span>
+                <span><kbd>n</kbd> new</span>
+                <span><kbd>/</kbd> filter</span>
+                <span><kbd>ctrl</kbd>+<kbd>k</kbd> palette</span>
+                <span><kbd>?</kbd> all shortcuts</span>
+            </footer>
+        </div>
+
+        <div class="overlay" id="palette-overlay" hidden>
+            <div class="palette" role="dialog" aria-label="command palette">
+                <input
+                    id="palette-input"
+                    type="text"
+                    placeholder="type a command or a job name…"
+                    autocomplete="off"
+                    aria-label="command palette"
+                >
+                <ul id="palette-list" role="listbox"></ul>
+            </div>
+        </div>
+
+        <div class="overlay" id="help-overlay" hidden>
+            <div class="sheet" role="dialog" aria-label="keyboard shortcuts">
+                <h2>keyboard shortcuts</h2>
+                <div class="shortcut-grid" id="help-grid"></div>
+                <p class="faint">
+                    Everything in this page can be done from the keyboard. Press <kbd>esc</kbd> to close.
+                </p>
+            </div>
+        </div>
+
+        <div id="toast" aria-live="polite"></div>
+
+        <script type="module" src="app.js"></script>
+    </body>
+</html>
