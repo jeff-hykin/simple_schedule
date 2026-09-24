@@ -2,7 +2,7 @@
 // static page and an event stream so the GUI can refresh itself.
 
 import { contentType } from "jsr:@std/media-types@1.1.0"
-import { extname, fromFileUrl, join, normalize } from "jsr:@std/path@1.1.2"
+import { extname, fromFileUrl } from "jsr:@std/path@1.1.2"
 import { exampleJob, knownJobFields, overlapPolicies } from "../job_schema.js"
 import { scheduleKinds } from "../schedule.js"
 import { backoffKinds } from "../job_schema.js"
@@ -24,9 +24,42 @@ import {
     triggerJob,
 } from "../operations.js"
 
-/** @returns {string} the directory holding the GUI's static files */
-function webDirectory() {
-    return fromFileUrl(import.meta.resolve("./web/"))
+// The GUI's files sit next to this module, which may be a directory on disk or a URL this tool was
+// installed from. Resolving against import.meta gives one base that covers both.
+const webRoot = import.meta.resolve("./web/")
+
+/** @type {Map<string, Uint8Array>} */
+const remoteFileCache = new Map()
+
+/**
+ * Read one of the GUI's files, wherever this tool happens to be installed from.
+ * @param {string} relativePath
+ * @returns {Promise<Uint8Array|null>} null when there is no such file, or when the path climbed out
+ */
+async function readWebFile(relativePath) {
+    const target = new URL(relativePath, webRoot)
+    // one check covers both cases: anything that climbed above the root no longer has its prefix
+    if (!target.href.startsWith(webRoot)) {
+        return null
+    }
+    if (target.protocol == "file:") {
+        try {
+            return await Deno.readFile(fromFileUrl(target.href))
+        } catch (_error) {
+            return null
+        }
+    }
+    const cached = remoteFileCache.get(target.href)
+    if (cached) {
+        return cached
+    }
+    const response = await fetch(target)
+    if (!response.ok) {
+        return null
+    }
+    const body = new Uint8Array(await response.arrayBuffer())
+    remoteFileCache.set(target.href, body)
+    return body
 }
 
 /**
@@ -72,18 +105,13 @@ async function readJsonBody(request) {
  */
 async function serveStatic(pathname) {
     const relative = pathname == "/" ? "index.html" : pathname.slice(1)
-    const resolved = normalize(join(webDirectory(), relative))
-    if (!resolved.startsWith(webDirectory())) {
-        return new Response("no", { status: 403 })
-    }
-    try {
-        const body = await Deno.readFile(resolved)
-        return new Response(body, {
-            headers: { "content-type": contentType(extname(resolved)) ?? "application/octet-stream" },
-        })
-    } catch (_error) {
+    const body = await readWebFile(relative)
+    if (body == null) {
         return new Response("not found", { status: 404 })
     }
+    return new Response(body, {
+        headers: { "content-type": contentType(extname(relative)) ?? "application/octet-stream" },
+    })
 }
 
 /** Everything the GUI needs for one render, in one request. */

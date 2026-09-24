@@ -45,8 +45,28 @@ Deno.test("the GUI's own files are served", async () => {
 })
 
 Deno.test("a path that climbs out of the web directory is refused", async () => {
-    const response = await handleRequest(new Request("http://localhost/../../main.js"))
-    assertEquals([403, 404].includes(response.status), true)
+    for (const path of ["/../../main.js", "/..%2f..%2fmain.js", "/web/../../../etc/passwd"]) {
+        const response = await handleRequest(new Request(`http://localhost${path}`))
+        assertEquals(response.status, 404, `${path} should not have been served`)
+    }
+})
+
+Deno.test("the favicon is a real drawing, not a text glyph", async () => {
+    const response = await handleRequest(new Request("http://localhost/favicon.svg"))
+    assertEquals(response.status, 200)
+    assertStringIncludes(response.headers.get("content-type"), "image/svg+xml")
+    const body = await response.text()
+    assertStringIncludes(body, "<circle")
+    // a glyph positioned by its baseline is what made the old one sit off-centre
+    assertEquals(body.includes("<text"), false)
+    assertStringIncludes(body, `viewBox="0 0 32 32"`)
+    assertStringIncludes(body, `cx="16"`)
+    assertStringIncludes(body, `cy="16"`)
+})
+
+Deno.test("the page asks for that favicon", async () => {
+    const page = await (await handleRequest(new Request("http://localhost/"))).text()
+    assertStringIncludes(page, `<link rel="icon" type="image/svg+xml" href="favicon.svg">`)
 })
 
 Deno.test("the whole job lifecycle works over HTTP", async () => {
