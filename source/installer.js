@@ -1,25 +1,26 @@
 // Making the daemon survive a reboot: a launchd job on macOS, a systemd unit on Linux, at either
 // user scope (no sudo) or system scope (sudo, survives logout, can run jobs as other users).
 
-import { fromFileUrl, join } from "jsr:@std/path@1.1.2"
+import { join } from "jsr:@std/path@1.1.2"
 import { daemonLogPath, homeDirectory, isRunningAsRoot, stateDirectory } from "./paths.js"
+import { denoExecutablePath, isRunningUnderDeno, specifierForAnotherProcess } from "./runtime_locations.js"
 
 export const serviceLabel = "com.github.jeff-hykin.simple_schedule"
 export const serviceName = "simple_schedule"
 export const installScopes = ["user", "system"]
 
 /**
- * How to start the daemon, as an argv. Works whether this is running from source or from a binary
- * built with `deno compile`.
+ * How to start the daemon, as an argv. The service file outlives this process, so it has to name
+ * something that still works later: the Deno binary plus this module when running under Deno
+ * (whether that module is a local file or a URL), or the compiled binary itself otherwise.
  * @returns {string[]}
  */
 export function daemonCommandLine() {
-    const mainModule = fromFileUrl(import.meta.resolve("../main.js"))
-    const executable = Deno.execPath()
-    if (executable.endsWith("/deno") || executable.endsWith("deno")) {
-        return [executable, "run", "--allow-all", "--quiet", mainModule, "daemon"]
+    if (!isRunningUnderDeno()) {
+        return [Deno.execPath(), "daemon"]
     }
-    return [executable, "daemon"]
+    const mainModule = specifierForAnotherProcess(import.meta.resolve("../main.js"))
+    return [denoExecutablePath(), "run", "--allow-all", "--quiet", mainModule, "daemon"]
 }
 
 /**

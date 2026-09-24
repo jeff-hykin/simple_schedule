@@ -1,17 +1,17 @@
 // Running one job: building the process, capturing its output into the job's log, enforcing the
 // timeout, and applying the retry/backoff policy.
 
-import { fromFileUrl } from "jsr:@std/path@1.1.2"
 import { parseDuration } from "./durations.js"
 import { backoffDelayFor } from "./job_schema.js"
 import { openLogFile } from "./log_files.js"
 import { defaultLogPathFor } from "./paths.js"
+import { denoExecutablePath, specifierForAnotherProcess } from "./runtime_locations.js"
 
 const textEncoder = new TextEncoder()
 
-/** @returns {string} the path of the little wrapper that hot-imports a JS job */
+/** @returns {string} the wrapper that hot-imports a JS job, as a path or a URL */
 export function jobFunctionEntryPath() {
-    return fromFileUrl(import.meta.resolve("./job_function_entry.js"))
+    return specifierForAnotherProcess(import.meta.resolve("./job_function_entry.js"))
 }
 
 /**
@@ -39,7 +39,7 @@ export function commandLineFor(job) {
     let pieces
     if (job.task.type == "js") {
         pieces = [
-            Deno.execPath(),
+            denoExecutablePath(),
             "run",
             ...job.task.permissions,
             "--quiet",
