@@ -7,6 +7,10 @@ JSON-in/JSON-out **CLI**, or a keyboard-first **web GUI**.
 Windows is deliberately out of scope.
 
 ```sh
+# get the command (see Installing below for the other ways)
+deno install --global --allow-all --name simple_schedule \
+    https://raw.githubusercontent.com/jeff-hykin/simple_schedule/master/main.js
+
 # add a job
 simple_schedule add --id backup --command 'rsync -a ~/notes /backup' --schedule 'daily at 2am'
 
@@ -139,11 +143,73 @@ firing a burst of missed runs.
 
 ## Installing
 
+There are two separate things called installing here, and you want them in this order: first put the
+`simple_schedule` **command** on your PATH, then optionally install the **daemon** as a service so jobs keep
+firing after a reboot.
+
+### 1. The command
+
+You need [Deno](https://deno.com) 2.x (`deno --version`). There is nothing else to install — no Node, no
+package manager, no build step.
+
+```sh
+# straight from GitHub, nothing to clone
+deno install --global --allow-all --name simple_schedule \
+    https://raw.githubusercontent.com/jeff-hykin/simple_schedule/master/main.js
+```
+
+```sh
+# or from a checkout, which is what you want if you plan to change it
+git clone https://github.com/jeff-hykin/simple_schedule
+cd simple_schedule
+deno install --global --allow-all --name simple_schedule ./main.js
+```
+
+```sh
+# or a standalone binary that does not need deno on PATH to start
+deno compile --allow-all --output simple_schedule main.js
+```
+
+```sh
+# or do not install anything at all
+deno run --allow-all main.js --help
+```
+
+`deno install` puts a shim in `~/.deno/bin`, so that has to be on your `PATH`:
+
+```sh
+export PATH="$HOME/.deno/bin:$PATH"
+```
+
+The shim points back at wherever the source lives — a URL, or your checkout — so if you installed from a
+clone, do not delete or move the clone. `deno install --global --force …` re-points it.
+
+JavaScript jobs run in their own Deno process, so `deno` needs to be on the PATH of whoever runs the daemon.
+Shell-command jobs do not care.
+
+Check it worked:
+
+```sh
+simple_schedule --version
+simple_schedule status
+```
+
+### 2. The daemon, as a service
+
+Until you do this, jobs only run when you trigger them — nothing is watching the clock. Everything else
+(adding, editing, listing, triggering, stats) already works without it.
+
 ```sh
 simple_schedule install                        # just you: no sudo, starts when you log in
 sudo simple_schedule install --scope system    # everyone: starts at boot, survives logout
 simple_schedule install --dry-run              # print the unit file and commands, change nothing
 simple_schedule uninstall [--scope system]
+```
+
+Or run the daemon in the foreground yourself, which is handy while trying things out:
+
+```sh
+simple_schedule daemon
 ```
 
 - **user scope** → a launchd `LaunchAgent` on macOS, a `systemd --user` unit on Linux. The daemon starts at
@@ -213,7 +279,8 @@ events.
 
 ```sh
 deno task test     # the whole suite
-deno task start    # run the CLI from source
+deno task check    # type check, lint, and formatting
+deno task start    # run the CLI from source, e.g. deno task start -- list
 ```
 
 No build step, no `package.json`, no `node_modules`. Dependencies are `jsr:@cliffy/*` for the CLI and prompts
