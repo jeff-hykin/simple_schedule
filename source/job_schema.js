@@ -8,6 +8,7 @@ import { defaultLogPathFor } from "./paths.js"
 export const taskTypes = ["command", "js"]
 export const overlapPolicies = ["skip", "queue", "allow"]
 export const backoffKinds = ["fixed", "exponential"]
+export const missedRunPolicies = ["runOnce", "skip"]
 
 const jobIdPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/
 
@@ -318,6 +319,15 @@ export function normalizeJob(input, options = {}) {
         )
     }
 
+    const missedRuns = input.missedRuns ?? "runOnce"
+    if (!missedRunPolicies.includes(missedRuns)) {
+        problems.push(
+            `missedRuns: must be one of ${
+                missedRunPolicies.join(", ")
+            } — what to do about runs that came due while the machine was asleep or the daemon was down, got "${missedRuns}"`,
+        )
+    }
+
     const logSource = input.log ?? {}
     if (!isPlainObject(logSource)) {
         problems.push(`log: must be an object like {"path":"/tmp/job.log","maxBytes":"5m","keepFiles":3}`)
@@ -381,6 +391,7 @@ export function normalizeJob(input, options = {}) {
         runAs,
         timeout,
         overlap,
+        missedRuns,
         onFailure,
         log: { path: logPath, maxBytes, keepFiles },
         keepRuns,
@@ -401,6 +412,7 @@ export const knownJobFields = [
     "runAs",
     "timeout",
     "overlap",
+    "missedRuns",
     "onFailure",
     "log",
     "keepRuns",

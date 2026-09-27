@@ -3,8 +3,18 @@
 import { nextCronOccurrence, parseCron } from "./cron.js"
 import { parseDuration } from "./durations.js"
 import { isValidTimeZone, systemTimeZone } from "./time_zones.js"
+import { describeRecurrence, nextRecurrence, normalizeRecurrence, parseRecurrenceText } from "./rrule.js"
 
-export const scheduleKinds = ["interval", "daily", "weekly", "monthly", "cron", "manual"]
+export const scheduleKinds = [
+    "interval",
+    "daily",
+    "weekly",
+    "monthly",
+    "cron",
+    "rrule",
+    "keepAlive",
+    "manual",
+]
 
 const weekdayLongNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
 
@@ -106,6 +116,12 @@ export function parseScheduleText(text) {
     if (lowered == "manual" || lowered == "never" || lowered == "none") {
         return { kind: "manual" }
     }
+    if (lowered == "keep alive" || lowered == "keepalive" || lowered == "always") {
+        return { kind: "keepAlive" }
+    }
+    if (/^(rrule:)?freq=/.test(lowered)) {
+        return { kind: "rrule", ...parseRecurrenceText(trimmed) }
+    }
     let match = lowered.match(/^every\s+(.+)$/)
     if (match) {
         const rest = match[1].trim()
@@ -164,6 +180,43 @@ export function normalizeSchedule(schedule) {
     if (kind == "manual") {
         return { kind: "manual" }
     }
+    if (kind == "keepAlive") {
+        return { kind: "keepAlive" }
+    }
+    return { ...normalizeTimedSchedule(kind, schedule), ...normalizeEndConditions(schedule) }
+}
+
+/**
+ * `count` and `until` end any timed schedule: after that many scheduled occurrences, or past that
+ * instant, it never comes due again.
+ * @param {object} schedule
+ * @returns {{count?: number, until?: string}}
+ */
+function normalizeEndConditions(schedule) {
+    const ends = {}
+    if (schedule.count != null) {
+        if (!Number.isInteger(schedule.count) || schedule.count < 1) {
+            throw new Error(
+                `schedule.count must be a whole number of at least 1, got ${JSON.stringify(schedule.count)}`,
+            )
+        }
+        ends.count = schedule.count
+    }
+    if (schedule.until != null) {
+        if (typeof schedule.until != "string" || isNaN(new Date(schedule.until).getTime())) {
+            throw new Error(`schedule.until must be an ISO timestamp, got ${JSON.stringify(schedule.until)}`)
+        }
+        ends.until = schedule.until
+    }
+    return ends
+}
+
+/**
+ * @param {string} kind
+ * @param {object} schedule
+ * @returns {object}
+ */
+function normalizeTimedSchedule(kind, schedule) {
     if (kind == "interval") {
         const every = parseDuration(schedule.every)
         if (every < 1000) {
@@ -176,8 +229,20 @@ export function normalizeSchedule(schedule) {
         return { kind: "interval", every: schedule.every, measuredFrom }
     }
     // the remaining kinds are all wall-clock anchored
-    const timeZone = schedule.timeZone ?? "local"
+    const timeZone = schedule.timeZone ?? schedule.tzid ?? "local"
     resolveTimeZone(timeZone)
+    if (kind == "rrule") {
+        const normalized = { kind: "rrule", ...normalizeRecurrence(schedule), timeZone }
+        if (schedule.start != null) {
+            if (typeof schedule.start != "string" || isNaN(new Date(schedule.start).getTime())) {
+                throw new Error(
+                    `schedule.start must be an ISO timestamp, got ${JSON.stringify(schedule.start)}`,
+                )
+            }
+            normalized.start = schedule.start
+        }
+        return normalized
+    }
     if (kind == "cron") {
         parseCron(schedule.expression)
         return { kind: "cron", expression: schedule.expression, timeZone }
@@ -229,12 +294,28 @@ export function cronExpressionOf(schedule) {
 /**
  * When does this job run next?
  * @param {object} schedule a normalized schedule
- * @param {{after?: Date, previousStartAt?: Date|null, previousEndAt?: Date|null, createdAt?: Date}} context
- * @returns {Date|null} null for manual jobs and for schedules that can never fire
+ * @param {{after?: Date, previousStartAt?: Date|null, previousEndAt?: Date|null, createdAt?: Date, occurrencesUsed?: number}} context
+ * @returns {Date|null} null for manual and keep-alive jobs, and for schedules that are over or can never fire
  */
 export function nextRunAt(schedule, context = {}) {
+    if (schedule.count != null && (context.occurrencesUsed ?? 0) >= schedule.count) {
+        return null
+    }
+    const next = nextRunIgnoringEnd(schedule, context)
+    if (next != null && schedule.until != null && next > new Date(schedule.until)) {
+        return null
+    }
+    return next
+}
+
+/**
+ * @param {object} schedule
+ * @param {object} context
+ * @returns {Date|null}
+ */
+function nextRunIgnoringEnd(schedule, context) {
     const after = context.after ?? new Date()
-    if (schedule.kind == "manual") {
+    if (schedule.kind == "manual" || schedule.kind == "keepAlive") {
         return null
     }
     if (schedule.kind == "interval") {
@@ -255,6 +336,10 @@ export function nextRunAt(schedule, context = {}) {
         return new Date(candidate)
     }
     const timeZone = resolveTimeZone(schedule.timeZone)
+    if (schedule.kind == "rrule") {
+        const start = schedule.start ? new Date(schedule.start) : context.createdAt ?? after
+        return nextRecurrence(schedule, { after, start, timeZone })
+    }
     return nextCronOccurrence(parseCron(cronExpressionOf(schedule)), after, timeZone)
 }
 
@@ -264,8 +349,26 @@ export function nextRunAt(schedule, context = {}) {
  * @returns {string}
  */
 export function describeSchedule(schedule) {
+    let text = describeWithoutEnd(schedule)
+    if (schedule.count != null) {
+        text += `, ${schedule.count} time${schedule.count == 1 ? "" : "s"}`
+    }
+    if (schedule.until != null) {
+        text += `, until ${schedule.until}`
+    }
+    return text
+}
+
+/**
+ * @param {object} schedule
+ * @returns {string}
+ */
+function describeWithoutEnd(schedule) {
     if (schedule.kind == "manual") {
         return "manual only"
+    }
+    if (schedule.kind == "keepAlive") {
+        return "kept running, restarted whenever it exits"
     }
     if (schedule.kind == "interval") {
         const measured = schedule.measuredFrom == "completion" ? " after each finish" : ""
@@ -282,6 +385,9 @@ export function describeSchedule(schedule) {
     }
     if (schedule.kind == "monthly") {
         return `day ${schedule.on.join(", ")} of each month at ${schedule.at} ${zone}`
+    }
+    if (schedule.kind == "rrule") {
+        return `${describeRecurrence(schedule)} ${zone}`
     }
     return `cron "${schedule.expression}" in ${zone}`
 }

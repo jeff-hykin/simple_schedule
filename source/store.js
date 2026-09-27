@@ -55,6 +55,25 @@ export class JobStore {
         return this.all().find((job) => job.id == id) ?? null
     }
 
+    /**
+     * Run a read-modify-write of jobs.json while holding an exclusive lock, so two processes adding
+     * jobs at the same moment cannot drop one another's.
+     * @template T
+     * @param {() => T} change
+     * @returns {T}
+     */
+    withLock(change) {
+        ensureStateDirectory()
+        Deno.mkdirSync(dirname(this.path), { recursive: true })
+        const lockFile = Deno.openSync(`${this.path}.lock`, { create: true, write: true })
+        try {
+            lockFile.lockSync(true)
+            return change()
+        } finally {
+            lockFile.close()
+        }
+    }
+
     /** @param {object[]} jobs */
     replaceAll(jobs) {
         ensureStateDirectory()
@@ -66,11 +85,35 @@ export class JobStore {
      * @returns {object} the normalized job that was stored
      */
     add(input) {
-        const jobs = this.all()
-        const job = normalizeJob(input, { existingIds: jobs.map((existing) => existing.id) })
-        jobs.push(job)
-        this.replaceAll(jobs)
-        return job
+        return this.withLock(() => {
+            const jobs = this.all()
+            const job = normalizeJob(input, { existingIds: jobs.map((existing) => existing.id) })
+            jobs.push(job)
+            this.replaceAll(jobs)
+            return job
+        })
+    }
+
+    /**
+     * Add the job, or replace the whole definition if one with this id exists (keeping its createdAt),
+     * so a program can declare what it wants without first asking what is there.
+     * @param {object} input
+     * @returns {object}
+     */
+    put(input) {
+        return this.withLock(() => {
+            const jobs = this.all()
+            const index = jobs.findIndex((job) => job.id == input?.id)
+            const previous = index == -1 ? undefined : jobs[index]
+            const job = normalizeJob({ ...input, createdAt: undefined }, { previous })
+            if (index == -1) {
+                jobs.push(job)
+            } else {
+                jobs[index] = job
+            }
+            this.replaceAll(jobs)
+            return job
+        })
     }
 
     /**
@@ -81,6 +124,11 @@ export class JobStore {
      * @returns {object}
      */
     update(id, changes) {
+        return this.withLock(() => this.updateUnlocked(id, changes))
+    }
+
+    /** @param {string} id @param {object} changes @returns {object} */
+    updateUnlocked(id, changes) {
         const jobs = this.all()
         const index = jobs.findIndex((job) => job.id == id)
         if (index == -1) {
@@ -103,12 +151,14 @@ export class JobStore {
 
     /** @param {string} id */
     remove(id) {
-        const jobs = this.all()
-        const remaining = jobs.filter((job) => job.id != id)
-        if (remaining.length == jobs.length) {
-            throw new Error(`no job with id "${id}"`)
-        }
-        this.replaceAll(remaining)
+        this.withLock(() => {
+            const jobs = this.all()
+            const remaining = jobs.filter((job) => job.id != id)
+            if (remaining.length == jobs.length) {
+                throw new Error(`no job with id "${id}"`)
+            }
+            this.replaceAll(remaining)
+        })
     }
 }
 
@@ -137,6 +187,12 @@ const schemaStatements = [
     )`,
 ]
 
+// columns added after the first release; each is added on open if an older database lacks it
+const addedColumns = [
+    `alter table job_state add column occurrences_used integer not null default 0`,
+    `alter table job_state add column schedule_fingerprint text`,
+]
+
 /** Run history and the bits of per-job state that change while the daemon runs. */
 export class RunStore {
     /** @param {string} [path] */
@@ -149,6 +205,15 @@ export class RunStore {
         this.database.exec("pragma busy_timeout = 5000")
         for (const statement of schemaStatements) {
             this.database.exec(statement)
+        }
+        for (const statement of addedColumns) {
+            try {
+                this.database.exec(statement)
+            } catch (error) {
+                if (!/duplicate column/i.test(error.message)) {
+                    throw error
+                }
+            }
         }
     }
 
@@ -287,7 +352,7 @@ export class RunStore {
 
     /**
      * @param {string} jobId
-     * @returns {{jobId: string, skipNext: number, nextRunAt: string|null, pausedUntil: string|null, lastSuccessAt: string|null, consecutiveFailures: number}}
+     * @returns {{jobId: string, skipNext: number, nextRunAt: string|null, pausedUntil: string|null, lastSuccessAt: string|null, consecutiveFailures: number, occurrencesUsed: number, scheduleFingerprint: string|null}}
      */
     state(jobId) {
         const row = this.database.prepare(`select * from job_state where job_id = ?`).get(jobId)
@@ -298,6 +363,8 @@ export class RunStore {
             pausedUntil: row?.paused_until ?? null,
             lastSuccessAt: row?.last_success_at ?? null,
             consecutiveFailures: row?.consecutive_failures ?? 0,
+            occurrencesUsed: row?.occurrences_used ?? 0,
+            scheduleFingerprint: row?.schedule_fingerprint ?? null,
         }
     }
 
@@ -369,6 +436,15 @@ function rowToRun(row) {
 }
 
 /**
+ * What a job's count of used occurrences is tied to; editing the schedule changes it.
+ * @param {object} job
+ * @returns {string}
+ */
+export function scheduleFingerprintOf(job) {
+    return JSON.stringify(job.schedule)
+}
+
+/**
  * When a job should next fire, taking its history and any pause into account.
  *
  * `applySkips` is the difference between the two callers: everything that shows a next-run time to a
@@ -390,12 +466,17 @@ export function nextRunForJob(job, runStore, after = new Date(), { applySkips = 
         after = new Date(state.pausedUntil)
     }
     const timings = runStore.lastTimings(job.id)
+    // an edited schedule starts its count afresh; the daemon resets the stored counter on its next tick
+    const occurrencesUsed = state.scheduleFingerprint == scheduleFingerprintOf(job)
+        ? state.occurrencesUsed
+        : 0
     const at = (from) =>
         nextRunAt(job.schedule, {
             after: from,
             previousStartAt: timings.previousStartAt,
             previousEndAt: timings.previousEndAt,
             createdAt: new Date(job.createdAt),
+            occurrencesUsed,
         })
     let candidate = at(after)
     if (applySkips) {

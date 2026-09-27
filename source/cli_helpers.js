@@ -85,11 +85,23 @@ export function jobInputFromFlags(options) {
     }
     if (options.schedule != null) {
         input.schedule = parseScheduleText(options.schedule)
-        if (
-            options.timeZone != null && input.schedule.kind != "interval" && input.schedule.kind != "manual"
-        ) {
+        if (options.timeZone != null && !["interval", "manual", "keepAlive"].includes(input.schedule.kind)) {
             input.schedule.timeZone = options.timeZone
         }
+    }
+    if (options.endAfter != null || options.until != null) {
+        if (input.schedule == null) {
+            throw new Error(`--end-after and --until are part of a schedule, so give --schedule with them`)
+        }
+        if (options.endAfter != null) {
+            input.schedule.count = options.endAfter
+        }
+        if (options.until != null) {
+            input.schedule.until = options.until
+        }
+    }
+    if (options.missedRuns != null) {
+        input.missedRuns = options.missedRuns
     }
     if (options.onBoot != null || options.onLogin != null) {
         input.activation = {}

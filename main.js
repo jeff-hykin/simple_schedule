@@ -6,7 +6,13 @@
 import { Command, EnumType } from "jsr:@cliffy/command@1.0.0-rc.7"
 import { color, paintStatus, renderTable, setColorEnabled } from "./source/colors.js"
 import { formatMaybeDuration, formatPercent, formatRelative, formatTimestamp } from "./source/formatting.js"
-import { exampleJob, JobValidationError, knownJobFields, overlapPolicies } from "./source/job_schema.js"
+import {
+    exampleJob,
+    JobValidationError,
+    knownJobFields,
+    missedRunPolicies,
+    overlapPolicies,
+} from "./source/job_schema.js"
 import { backoffKinds } from "./source/job_schema.js"
 import { jobInputFromFlags, mergeJobInput, readJsonFrom } from "./source/cli_helpers.js"
 import { commandLineFor } from "./source/runner.js"
@@ -18,11 +24,13 @@ import {
     listJobs,
     logsFor,
     pauseJob,
+    putJob,
     removeJob,
     runsFor,
     skipNextRuns,
     statsFor,
     stopDaemon,
+    stopJob,
     triggerJob,
 } from "./source/operations.js"
 import { runDaemon } from "./source/daemon.js"
@@ -166,6 +174,7 @@ function renderRunTable(runs) {
 const scopeType = new EnumType(installScopes)
 const overlapType = new EnumType(overlapPolicies)
 const backoffType = new EnumType(backoffKinds)
+const missedRunsType = new EnumType(missedRunPolicies)
 
 /**
  * The flags shared by `add` and `edit`.
@@ -188,12 +197,15 @@ function withJobFlags(command) {
         })
         .option(
             "--schedule <text:string>",
-            `when to run, e.g. "every 7h", "daily at 9am", "every monday at 09:00", "the first of the month at 03:00", or a cron line`,
+            `when to run, e.g. "every 7h", "daily at 9am", "every monday at 09:00", "the first of the month at 03:00", a cron line, "FREQ=WEEKLY;INTERVAL=2;BYDAY=SU;BYHOUR=17", or "keep alive"`,
         )
         .option(
             "--time-zone <zone:string>",
             `"local" (the default), "utc", or an IANA name like America/Los_Angeles`,
         )
+        .option("--end-after <count:integer>", "stop scheduling after this many occurrences")
+        .option("--until <timestamp:string>", "stop scheduling after this ISO timestamp")
+        .option("--missed-runs <policy:missedRuns>", "make up a run slept through with one run, or skip it")
         .option("--on-boot", "also run when the machine boots")
         .option("--on-login", "also run when you log in")
         .option("--cwd <path:string>", "working directory for the job")
@@ -241,12 +253,20 @@ Fields: ${knownJobFields.join(", ")}
                   {"kind":"weekly","at":"09:00","on":["monday"],"timeZone":"local"}
                   {"kind":"monthly","at":"03:00","on":[1],"timeZone":"local"}
                   {"kind":"cron","expression":"0 9 * * mon-fri","timeZone":"local"}
+                  {"kind":"rrule","freq":"WEEKLY","interval":2,"byday":["SU"],"byhour":[17],"byminute":[0],
+                   "timeZone":"America/Los_Angeles","start":"<ISO, defaults to createdAt>"}
+                   (RFC 5545 subset: freq, interval, bymonth, bymonthday, byday, byhour, byminute, bysecond;
+                    "FREQ=...;BYDAY=..." text works too)
+                  {"kind":"keepAlive"}  start it now, restart it whenever it exits (crash loops back off
+                   per onFailure.backoff; a run that lasted 60s+ restarts after 1s)
                   {"kind":"manual"}
+                  every timed kind also takes "count" (stop after that many occurrences) and "until" (ISO)
   activation      {"onBoot":false,"onLogin":false}
   environment     {"inherit":true,"variables":{},"remove":[]}
   runAs           a username; needs a system-scope install
   timeout         a duration like "30m", or null
   overlap         "skip" | "queue" | "allow"
+  missedRuns      "runOnce" (default: a slot slept through runs once on wake) | "skip"
   onFailure       {"retries":0,"backoff":{"kind":"exponential","initial":"30s","max":"1h","multiplier":2,"jitter":0},
                    "thenRun":null,"notify":null}
   log             {"path":"...","maxBytes":5242880,"keepFiles":3}
@@ -268,6 +288,7 @@ run statistics. Everything here also works from the TUI ("simple_schedule tui") 
     .globalType("scope", scopeType)
     .globalType("overlap", overlapType)
     .globalType("backoff", backoffType)
+    .globalType("missedRuns", missedRunsType)
     .globalOption("--json", "print machine-readable JSON instead of a table")
     .globalOption("--no-color", "never use color")
     .default("tui")
@@ -333,6 +354,22 @@ withJobFlags(program.command("edit <id:string>", "change a job"))
         emit(options, job, () => `${color.green("updated")} ${color.bold(job.id)}`)
     })
 
+withJobFlags(program.command("put", "add a job, or replace the whole definition of the one with that id"))
+    .option("--id <id:string>", "the job's id")
+    .example(
+        "declare a job from a program, whether or not it exists yet",
+        `echo '{"id":"x","task":"true","schedule":"every 5m"}' | simple_schedule put --json-file -`,
+    )
+    .action(async (options) => {
+        const job = await putJob(await jobInputFrom(options))
+        const stored = await getJob(job.id)
+        emit(
+            options,
+            stored,
+            () => `${color.green("stored")} ${color.bold(job.id)}\n${renderJobDetail(stored)}`,
+        )
+    })
+
 program
     .command("remove <id:string>", "delete a job")
     .alias("rm")
@@ -371,6 +408,29 @@ program
             }
             return `${id}: ${paintStatus(outcome.result.status)} after ${outcome.result.attempts} attempt(s)`
         })
+    })
+
+program
+    .command(
+        "kill <id:string>",
+        "kill a job's run in progress (a keep-alive job comes back; disable it to keep it down)",
+    )
+    .option("--no-wait", "return without waiting for it to exit")
+    .action(async (options, id) => {
+        const result = await stopJob(id, { wait: options.wait !== false })
+        emit(
+            options,
+            result,
+            () => result.wasRunning ? `${color.yellow("stopped")} ${id}` : `${id} was not running`,
+        )
+    })
+
+program
+    .command("restart <id:string>", "kill a job's run in progress and start it again right away")
+    .option("--no-wait", "return without waiting for the old run to exit")
+    .action(async (options, id) => {
+        const result = await stopJob(id, { restart: true, wait: options.wait !== false })
+        emit(options, result, () => `${color.green("restarted")} ${id}`)
     })
 
 program

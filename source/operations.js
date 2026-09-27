@@ -170,6 +170,37 @@ export async function addJob(input) {
     return job
 }
 
+/**
+ * Add the job, or replace the whole definition of the one with this id.
+ * @param {object} input
+ * @returns {Promise<object>}
+ */
+export async function putJob(input) {
+    const store = new JobStore()
+    const job = store.put(input)
+    await nudgeDaemon()
+    return job
+}
+
+/**
+ * Kill a job's run in progress (and with `restart`, start it again). Only the daemon has runs to stop.
+ * @param {string} id
+ * @param {{restart?: boolean, wait?: boolean}} [options]
+ * @returns {Promise<object>}
+ */
+export async function stopJob(id, { restart = false, wait = true } = {}) {
+    try {
+        return await askDaemon({ command: restart ? "restart" : "stop", id, wait }, {
+            timeoutMs: wait ? 30000 : 5000,
+        })
+    } catch (error) {
+        if (error instanceof DaemonNotRunningError) {
+            throw new Error(`the daemon is not running, so no job of it is running either`)
+        }
+        throw error
+    }
+}
+
 /** @param {string} id @param {object} changes @returns {Promise<object>} */
 export async function editJob(id, changes) {
     const store = new JobStore()

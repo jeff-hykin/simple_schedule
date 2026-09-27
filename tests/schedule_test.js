@@ -268,3 +268,61 @@ Deno.test("describeSchedule says something a person can read", () => {
     )
     assertEquals(describeSchedule(normalizeSchedule({ kind: "manual" })), "manual only")
 })
+
+Deno.test("normalizeSchedule reads rrule and keepAlive schedules, and end conditions", () => {
+    assertEquals(normalizeSchedule({ kind: "keepAlive", count: 3 }), { kind: "keepAlive" })
+    assertEquals(
+        normalizeSchedule({ kind: "rrule", freq: "daily", byhour: [9], tzid: "America/Chicago", count: 2 }),
+        { kind: "rrule", freq: "DAILY", interval: 1, byhour: [9], timeZone: "America/Chicago", count: 2 },
+    )
+    assertEquals(
+        normalizeSchedule({ kind: "daily", at: "09:00", until: "2027-01-01T00:00:00Z" }).until,
+        "2027-01-01T00:00:00Z",
+    )
+    assertThrows(
+        () => normalizeSchedule({ kind: "interval", every: "1h", count: 0 }),
+        Error,
+        "schedule.count",
+    )
+    assertThrows(() => normalizeSchedule({ kind: "daily", until: "someday" }), Error, "schedule.until")
+    assertThrows(
+        () => normalizeSchedule({ kind: "rrule", freq: "DAILY", start: "nope" }),
+        Error,
+        "schedule.start",
+    )
+})
+
+Deno.test("parseScheduleText reads keep alive and RFC 5545 rule text", () => {
+    assertEquals(parseScheduleText("keep alive"), { kind: "keepAlive" })
+    assertEquals(parseScheduleText("FREQ=HOURLY;INTERVAL=3;COUNT=5"), {
+        kind: "rrule",
+        freq: "HOURLY",
+        interval: 3,
+        count: 5,
+    })
+})
+
+Deno.test("nextRunAt: count and until end any schedule", () => {
+    const createdAt = new Date("2026-01-05T10:00:00Z")
+    const after = new Date("2026-01-05T10:30:00Z")
+    const hourly = normalizeSchedule({ kind: "interval", every: "1h", count: 2 })
+    assertEquals(nextRunAt(hourly, { after, createdAt, occurrencesUsed: 1 }) != null, true)
+    assertEquals(nextRunAt(hourly, { after, createdAt, occurrencesUsed: 2 }), null)
+    const bounded = normalizeSchedule({ kind: "interval", every: "1h", until: "2026-01-05T10:59:00Z" })
+    assertEquals(nextRunAt(bounded, { after, createdAt }), null)
+    assertEquals(nextRunAt({ kind: "keepAlive" }, { after, createdAt }), null)
+})
+
+Deno.test("nextRunAt: an rrule is anchored at its start, defaulting to when the job was made", () => {
+    const createdAt = new Date("2026-01-05T10:07:00Z")
+    const everyTwenty = normalizeSchedule({ kind: "rrule", freq: "MINUTELY", interval: 20 })
+    assertEquals(
+        nextRunAt(everyTwenty, { after: new Date("2026-01-05T11:00:00Z"), createdAt }).toISOString(),
+        "2026-01-05T11:07:00.000Z",
+    )
+    const anchored = { ...everyTwenty, start: "2026-01-05T10:00:00Z" }
+    assertEquals(
+        nextRunAt(anchored, { after: new Date("2026-01-05T11:00:00Z"), createdAt }).toISOString(),
+        "2026-01-05T11:20:00.000Z",
+    )
+})

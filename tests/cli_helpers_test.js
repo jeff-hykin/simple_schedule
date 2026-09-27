@@ -86,3 +86,29 @@ Deno.test("a typo in the JSON is caught before anything is written", () => {
     assertStringIncludes(error.message, "unknown field in the JSON: scedule")
     assertStringIncludes(error.message, "allowed fields are")
 })
+
+Deno.test("the CLI assembles without clashing command names, and lists the new commands", async () => {
+    const output = await new Deno.Command(Deno.execPath(), {
+        args: ["run", "--allow-all", new URL("../main.js", import.meta.url).pathname, "--help"],
+        stdout: "piped",
+        stderr: "piped",
+    }).output()
+    const text = new TextDecoder().decode(output.stdout)
+    assertEquals(output.success, true, new TextDecoder().decode(output.stderr))
+    for (const command of ["put", "kill", "restart", "stop"]) {
+        assertStringIncludes(text, command)
+    }
+})
+
+Deno.test("--end-after and --until land on the schedule, and need one", () => {
+    assertEquals(
+        jobInputFromFlags({ schedule: "every 1h", endAfter: 3, until: "2027-01-01T00:00:00Z" }).schedule,
+        {
+            kind: "interval",
+            every: "1h",
+            count: 3,
+            until: "2027-01-01T00:00:00Z",
+        },
+    )
+    assertThrows(() => jobInputFromFlags({ endAfter: 3 }), Error, "--schedule")
+})

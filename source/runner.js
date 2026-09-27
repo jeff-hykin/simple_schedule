@@ -8,6 +8,40 @@ import { defaultLogPathFor } from "./paths.js"
 import { denoExecutablePath, specifierForAnotherProcess } from "./runtime_locations.js"
 
 const textEncoder = new TextEncoder()
+const killGraceMilliseconds = 10 * 1000
+const pipeDrainMilliseconds = 2 * 1000
+
+/**
+ * Every process descended from `pid`, found through pgrep, deepest last.
+ * @param {number} pid
+ * @returns {number[]}
+ */
+function descendantsOf(pid) {
+    let output
+    try {
+        output = new Deno.Command("pgrep", { args: ["-P", String(pid)], stdout: "piped", stderr: "null" })
+            .outputSync()
+    } catch (_error) {
+        return []
+    }
+    const children = new TextDecoder().decode(output.stdout).split(/\s+/).filter(Boolean).map(Number)
+    return children.flatMap((child) => [child, ...descendantsOf(child)])
+}
+
+/**
+ * Send a signal to a process and everything it started. Processes that already exited are ignored.
+ * @param {number} pid
+ * @param {Deno.Signal} signal
+ */
+export function signalProcessTree(pid, signal) {
+    for (const target of [pid, ...descendantsOf(pid)]) {
+        try {
+            Deno.kill(target, signal)
+        } catch (_error) {
+            // it exited between the listing and the signal
+        }
+    }
+}
 
 /** @returns {string} the wrapper that hot-imports a JS job, as a path or a URL */
 export function jobFunctionEntryPath() {
@@ -72,13 +106,27 @@ function writeLogLine(logFile, text) {
  * @param {ReadableStream<Uint8Array>} stream
  * @param {Deno.FsFile} logFile
  * @param {string} prefix
+ * @param {ReadableStreamDefaultReader[]} readers collects the reader, so the caller can stop waiting on it
  * @returns {Promise<string>}
  */
-async function pumpStream(stream, logFile, prefix) {
+async function pumpStream(stream, logFile, prefix, readers) {
     const decoder = new TextDecoder()
     let pending = ""
     let tail = ""
-    for await (const chunk of stream) {
+    const reader = stream.getReader()
+    readers.push(reader)
+    while (true) {
+        let chunk
+        try {
+            const read = await reader.read()
+            if (read.done) {
+                break
+            }
+            chunk = read.value
+        } catch (_error) {
+            // cancelled because the process is gone and only a leftover child still held the pipe
+            break
+        }
         pending += decoder.decode(chunk, { stream: true })
         const lines = pending.split("\n")
         pending = lines.pop() ?? ""
@@ -130,35 +178,42 @@ export async function runOnce(job, { trigger, attempt, signal }) {
 
     let timedOut = false
     let timeoutHandle = null
+    let killHandle = null
+    // ask nicely, then insist: a process that ignores SIGTERM must not hold up a stop or a restart
+    // the whole tree, so a shell's children do not outlive it
+    const terminate = () => {
+        signalProcessTree(child.pid, "SIGTERM")
+        killHandle ??= setTimeout(() => signalProcessTree(child.pid, "SIGKILL"), killGraceMilliseconds)
+    }
     const timeoutMilliseconds = job.timeout == null ? null : parseDuration(job.timeout)
     if (timeoutMilliseconds != null) {
         timeoutHandle = setTimeout(() => {
             timedOut = true
-            try {
-                child.kill("SIGTERM")
-            } catch (_error) {
-                // the process already went away on its own
-            }
+            terminate()
         }, timeoutMilliseconds)
     }
-    const onAbort = () => {
-        try {
-            child.kill("SIGTERM")
-        } catch (_error) {
-            // already gone
-        }
-    }
-    signal?.addEventListener("abort", onAbort, { once: true })
+    signal?.addEventListener("abort", terminate, { once: true })
 
-    const [outputTail, errorTail, status] = await Promise.all([
-        pumpStream(child.stdout, logFile, ""),
-        pumpStream(child.stderr, logFile, "! "),
-        child.status,
+    const readers = []
+    const pumps = Promise.all([
+        pumpStream(child.stdout, logFile, "", readers),
+        pumpStream(child.stderr, logFile, "! ", readers),
     ])
-    if (timeoutHandle != null) {
-        clearTimeout(timeoutHandle)
+    const status = await child.status
+    // a backgrounded grandchild can hold the pipes open forever; the run is over when the process is
+    let drainHandle
+    const drained = await Promise.race([
+        pumps.then(() => true),
+        new Promise((resolve) => drainHandle = setTimeout(() => resolve(false), pipeDrainMilliseconds)),
+    ])
+    clearTimeout(drainHandle)
+    if (!drained) {
+        await Promise.all(readers.map((reader) => reader.cancel().catch(() => {})))
     }
-    signal?.removeEventListener("abort", onAbort)
+    const [outputTail, errorTail] = await pumps
+    clearTimeout(timeoutHandle)
+    clearTimeout(killHandle)
+    signal?.removeEventListener("abort", terminate)
 
     const endedAt = new Date()
     let resultStatus = status.success ? "success" : "failure"
@@ -166,6 +221,9 @@ export async function runOnce(job, { trigger, attempt, signal }) {
     if (timedOut) {
         resultStatus = "timeout"
         error = `killed after ${job.timeout}`
+    } else if (signal?.aborted) {
+        resultStatus = "stopped"
+        error = "stopped on request"
     } else if (!status.success) {
         const lastLines = (errorTail || outputTail).trim().split("\n").slice(-6).join("\n")
         error = lastLines.length > 0 ? lastLines : `exited with code ${status.code}`
@@ -203,7 +261,9 @@ function delay(milliseconds, signal) {
  * @returns {Promise<{status: string, attempts: number, runIds: number[], chainTo: string|null}>}
  */
 export async function runJob(job, { runStore, trigger = "manual", signal, onEvent }) {
-    const attemptsAllowed = job.onFailure.retries + 1
+    // a keep-alive job's "retry" is the daemon restarting it, so each lifetime is one attempt
+    const isKeepAlive = job.schedule.kind == "keepAlive"
+    const attemptsAllowed = isKeepAlive ? 1 : job.onFailure.retries + 1
     const runIds = []
     let lastStatus = "failure"
     let lastError = null
@@ -229,7 +289,7 @@ export async function runJob(job, { runStore, trigger = "manual", signal, onEven
             status: outcome.status,
             error: outcome.error,
         })
-        if (outcome.status == "success") {
+        if (outcome.status == "success" || signal?.aborted) {
             break
         }
         if (attempt < attemptsAllowed && !signal?.aborted) {
@@ -241,7 +301,7 @@ export async function runJob(job, { runStore, trigger = "manual", signal, onEven
 
     runStore.trimHistory(job.id, job.keepRuns)
 
-    if (lastStatus != "success" && job.onFailure.notify) {
+    if (lastStatus != "success" && job.onFailure.notify && !isKeepAlive && !signal?.aborted) {
         await notifyFailure(job, lastError)
     }
 
@@ -249,7 +309,7 @@ export async function runJob(job, { runStore, trigger = "manual", signal, onEven
         status: lastStatus,
         attempts: runIds.length,
         runIds,
-        chainTo: lastStatus == "success" ? null : job.onFailure.thenRun,
+        chainTo: lastStatus == "success" || isKeepAlive || signal?.aborted ? null : job.onFailure.thenRun,
     }
 }
 
