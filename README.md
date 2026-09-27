@@ -9,7 +9,7 @@ Windows is deliberately out of scope.
 ```sh
 # get the command (see Installing below for the other ways)
 deno install --global --allow-all --name simple_schedule \
-    https://raw.githubusercontent.com/jeff-hykin/simple_schedule/v0.1.0/main.js
+    https://raw.githubusercontent.com/jeff-hykin/simple_schedule/v0.2.0/main.js
 
 # add a job
 simple_schedule add --id backup --command 'rsync -a ~/notes /backup' --schedule 'daily at 2am'
@@ -176,7 +176,7 @@ package manager, no build step.
 ```sh
 # straight from GitHub, nothing to clone
 deno install --global --allow-all --name simple_schedule \
-    https://raw.githubusercontent.com/jeff-hykin/simple_schedule/v0.1.0/main.js
+    https://raw.githubusercontent.com/jeff-hykin/simple_schedule/v0.2.0/main.js
 ```
 
 Pin to a tag rather than to `master`: GitHub serves raw files through a CDN that goes on handing out an old

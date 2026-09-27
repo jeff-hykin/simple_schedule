@@ -46,7 +46,7 @@ import { stateDirectory } from "./source/paths.js"
 import { startServer } from "./source/server/server.js"
 import { runTui } from "./source/tui/tui.js"
 
-export const version = "0.1.0"
+export const version = "0.2.0"
 
 /**
  * @param {object} options
