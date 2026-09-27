@@ -91,11 +91,39 @@ async function askForSchedule(current) {
             { name: "weekly on chosen days", value: "weekly" },
             { name: "monthly on chosen dates (e.g. the 1st)", value: "monthly" },
             { name: "a cron expression", value: "cron" },
+            { name: "a recurrence rule (e.g. every other Sunday)", value: "rrule" },
+            { name: "keep it running, restart it when it exits", value: "keepAlive" },
             { name: "only when I trigger it", value: "manual" },
         ],
     })
-    if (kind == "manual") {
-        return { kind: "manual" }
+    if (kind == "manual" || kind == "keepAlive") {
+        return { kind }
+    }
+    if (kind == "rrule") {
+        const text = await Input.prompt({
+            message: "recurrence rule",
+            default: current?.kind == "rrule"
+                ? ["freq", "interval", "bymonth", "bymonthday", "byday", "byhour", "byminute", "bysecond"]
+                    .filter((part) => current[part] != null)
+                    .map((part) => `${part.toUpperCase()}=${[current[part]].flat().join(",")}`)
+                    .join(";")
+                : "FREQ=WEEKLY;INTERVAL=2;BYDAY=SU;BYHOUR=17;BYMINUTE=0",
+            hint: "RFC 5545: FREQ, INTERVAL, BYMONTH, BYMONTHDAY, BYDAY, BYHOUR, BYMINUTE, BYSECOND",
+            validate: (value) => {
+                try {
+                    normalizeSchedule(value)
+                    return true
+                } catch (error) {
+                    return error.message
+                }
+            },
+        })
+        const timeZone = await Input.prompt({
+            message: "in which time zone?",
+            default: current?.timeZone ?? "local",
+            hint: `"local", "utc", or an IANA name like America/Los_Angeles`,
+        })
+        return { ...parseScheduleText(text), timeZone }
     }
     if (kind == "interval") {
         const every = await Input.prompt({

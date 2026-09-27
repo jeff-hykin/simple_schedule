@@ -103,19 +103,39 @@ anything it throws becomes the run's error. Narrow its permissions with
 { "kind": "weekly",   "at": "09:00", "on": ["monday", "friday"] }
 { "kind": "monthly",  "at": "03:00", "on": [1] }                    // the first of the month
 { "kind": "cron",     "expression": "0 9 * * mon-fri" }
+{ "kind": "rrule",    "freq": "WEEKLY", "interval": 2, "byday": ["SU"], "byhour": [17], "byminute": [0] }
+{ "kind": "keepAlive" }                                             // a service: kept running
 { "kind": "manual" }                                                // only when triggered
 ```
 
 `--schedule` and the TUI also take these as one-liners: `every 7h`, `daily at 9am`, `every monday at 09:00`,
-`the first of the month at 03:00`, `0 9 * * mon-fri`, `manual`.
+`the first of the month at 03:00`, `0 9 * * mon-fri`, `FREQ=WEEKLY;INTERVAL=2;BYDAY=SU;BYHOUR=17`,
+`keep alive`, `manual`.
+
+**`rrule`** is the RFC 5545 (iCalendar) recurrence subset: `freq` (`YEARLY` … `SECONDLY`), `interval`,
+`bymonth`, `bymonthday`, `byday` (`"MO"` or `"monday"`), `byhour`, `byminute`, `bysecond`. It covers what cron
+cannot, like every other Sunday. It is anchored at `start` (an ISO timestamp, default: when the job was
+created), the way DTSTART anchors a calendar event. Daily-or-longer rules follow the wall clock, so 5pm stays
+5pm across daylight saving; hourly-or-shorter rules follow elapsed time, so "every 20 minutes" never stalls or
+doubles up when the clocks change. `tzid` is accepted as another name for `timeZone`.
+
+**Ending a schedule.** Every timed kind takes `"count"` (stop after that many occurrences, skipped ones
+included) and `"until"` (an ISO timestamp). Editing the schedule starts its count over.
+
+**`keepAlive`** runs the job as a long-lived service: it starts as soon as the daemon does, and whenever it
+exits it is started again. A process that lasted a minute or more comes back after a second; one that keeps
+dying young backs off per `onFailure.backoff`. Disabling or removing the job stops the process, and changing
+its definition restarts it on the new one. `simple_schedule restart <id>` bounces it by hand. The daemon is
+then the only thing the OS has to supervise.
 
 **Time zones matter here.** `"timeZone": "local"` means _the machine's own clock_: a 9am job stays at 9am when
 you fly somewhere else and when daylight saving moves the clocks. `"utc"` pins it to UTC instead, so it drifts
 by an hour in local terms twice a year. Any IANA name (`America/Los_Angeles`) works too. An `interval`
 schedule has no wall clock to anchor, so it takes no time zone.
 
-If the machine is asleep through several slots, an interval job lines back up on the next slot rather than
-firing a burst of missed runs.
+**Missed runs.** If the machine is asleep, or the daemon is down, through one or more slots, the job runs
+_once_ when it gets the chance (`trigger` is `missed` in its history) and then carries on from the next slot,
+never a burst. Set `"missedRuns": "skip"` for cron's behavior of silently dropping them.
 
 ### The rest
 
@@ -127,6 +147,7 @@ firing a burst of missed runs.
     "workingDirectory": null,
     "timeout": null, // "30m" — the job is killed past this
     "overlap": "skip", // or "queue", "allow"
+    "missedRuns": "runOnce", // or "skip"
     "onFailure": {
         "retries": 0,
         "backoff": { "kind": "exponential", "initial": "30s", "max": "1h", "multiplier": 2, "jitter": 0 },
@@ -227,14 +248,19 @@ On-boot jobs fire once per actual boot, not every time the daemon restarts.
 ## The CLI
 
 Everything is scriptable, every command takes `--json`, and job definitions can come from a file or stdin.
-Errors name the field and the allowed values, and exit non-zero.
+Writes to `jobs.json` hold a file lock, so several programs can add jobs at once without losing any; `put`
+lets a program declare the job it wants without checking first whether it exists. Errors name the field and
+the allowed values, and exit non-zero.
 
 ```sh
 simple_schedule list --json
 simple_schedule show backup
 simple_schedule add --json-file job.json          # or:  … --json-file -   to read stdin
+simple_schedule put --json-file job.json          # add, or replace the whole job with that id
 simple_schedule edit backup --retries 3 --backoff fixed --backoff-initial 1m
 simple_schedule trigger backup                    # run it now, wait for the result
+simple_schedule kill backup                       # kill the run in progress
+simple_schedule restart my-service                # kill it and start it again
 simple_schedule skip backup --count 2
 simple_schedule pause backup --until 2026-10-01T00:00:00Z
 simple_schedule stats backup --json

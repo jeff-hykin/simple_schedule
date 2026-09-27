@@ -228,16 +228,36 @@ function renderJobList() {
                         : statusBadge(job.stats.lastStatus),
                 ]),
                 make("div", { class: "schedule" }, [job.scheduleText]),
-                make("div", { class: "next" }, [job.nextRunAt ? formatRelative(job.nextRunAt) : "—"]),
+                make("div", { class: "next" }, [nextRunText(job, "—")]),
             ])
         ),
     )
+}
+
+/**
+ * What to show for "next run": keep-alive jobs have no next run, only running or restarting.
+ * @param {any} job
+ * @param {string} otherwise
+ * @returns {string}
+ */
+function nextRunText(job, otherwise) {
+    if (job.schedule.kind == "keepAlive") {
+        return job.isRunning
+            ? "running"
+            : job.restartAt
+            ? `restarting ${formatRelative(job.restartAt)}`
+            : "starting"
+    }
+    return job.nextRunAt ? formatRelative(job.nextRunAt) : otherwise
 }
 
 /** @param {any} job @returns {HTMLElement} */
 function renderJobActions(job) {
     return make("div", { class: "actions" }, [
         make("button", { onclick: () => triggerSelected() }, ["run now (t)"]),
+        job.isRunning || job.schedule.kind == "keepAlive"
+            ? make("button", { onclick: () => restartSelected() }, ["restart"])
+            : null,
         make("button", { onclick: () => skipSelected() }, ["skip next (s)"]),
         make("button", { onclick: () => setView("edit") }, ["edit (e)"]),
         make("button", { onclick: () => setView("runs") }, ["runs (r)"]),
@@ -259,8 +279,12 @@ function renderOverview(job) {
         make("div", { class: "tiles" }, [
             tile(
                 "next run",
-                job.nextRunAt ? formatRelative(job.nextRunAt) : "manual only",
-                job.nextRunAt ? formatTimestamp(job.nextRunAt) : "",
+                nextRunText(job, job.schedule.kind == "manual" ? "manual only" : "none — schedule is over"),
+                job.nextRunAt
+                    ? formatTimestamp(job.nextRunAt)
+                    : job.restartAt
+                    ? formatTimestamp(job.restartAt)
+                    : "",
             ),
             tile("last run", stats ? formatRelative(stats.lastRunAt) : "—", stats?.lastStatus ?? ""),
             tile(
@@ -503,8 +527,16 @@ function renderForm(draft, isNew) {
                 { value: "weekly", label: "weekly" },
                 { value: "monthly", label: "monthly" },
                 { value: "cron", label: "cron expression" },
+                { value: "rrule", label: "recurrence rule (RFC 5545)" },
+                { value: "keepAlive", label: "keep it running" },
                 { value: "manual", label: "only when triggered" },
             ]),
+            ...(scheduleKind == "rrule"
+                ? textField("rule", "schedule.ruleText", {
+                    placeholder: "FREQ=WEEKLY;INTERVAL=2;BYDAY=SU;BYHOUR=17;BYMINUTE=0",
+                    hint: "FREQ, INTERVAL, BYMONTH, BYMONTHDAY, BYDAY, BYHOUR, BYMINUTE, BYSECOND",
+                })
+                : []),
             ...(scheduleKind == "interval"
                 ? textField("every", "schedule.every", { hint: "a duration like 30m, 7h, 1d" })
                 : []),
@@ -522,10 +554,25 @@ function renderForm(draft, isNew) {
             ...(scheduleKind == "monthly"
                 ? textField("on dates", "schedule.onText", { hint: "comma separated, e.g. 1,15" })
                 : []),
-            ...(scheduleKind != "manual" && scheduleKind != "interval"
+            ...(!["manual", "interval", "keepAlive"].includes(scheduleKind)
                 ? textField("time zone", "schedule.timeZone", {
                     hint: `"local", "utc", or an IANA name like America/Los_Angeles`,
                 })
+                : []),
+            ...(!["manual", "keepAlive"].includes(scheduleKind)
+                ? [
+                    ...textField("end after", "schedule.count", {
+                        type: "number",
+                        hint: "this many runs; blank means no limit",
+                    }),
+                    ...textField("until", "schedule.until", {
+                        hint: "an ISO timestamp; blank means forever",
+                    }),
+                    ...selectField("runs slept through", "missedRuns", [
+                        { value: "runOnce", label: "run once on wake" },
+                        { value: "skip", label: "skip them" },
+                    ]),
+                ]
                 : []),
             ...checkboxField("also run when the machine boots", "activation.onBoot"),
             ...checkboxField("also run when I log in", "activation.onLogin"),
@@ -741,6 +788,22 @@ async function triggerSelected() {
     }
 }
 
+async function restartSelected() {
+    const job = selectedJob()
+    if (!job) {
+        return
+    }
+    toast(`restarting ${job.id}…`)
+    try {
+        await api(`/jobs/${encodeURIComponent(job.id)}/restart`, { method: "POST" })
+        toast(`${job.id} restarted`, "good")
+        await refresh()
+        await loadDetail()
+    } catch (error) {
+        reportError(error)
+    }
+}
+
 async function skipSelected() {
     const job = selectedJob()
     if (!job) {
@@ -855,6 +918,29 @@ function blankDraft() {
     }
 }
 
+const recurrenceParts = [
+    "freq",
+    "interval",
+    "bymonth",
+    "bymonthday",
+    "byday",
+    "byhour",
+    "byminute",
+    "bysecond",
+]
+
+/**
+ * An rrule schedule as "FREQ=...;BYDAY=..." text, for editing in one field.
+ * @param {any} schedule
+ * @returns {string}
+ */
+function recurrenceText(schedule) {
+    return recurrenceParts
+        .filter((part) => schedule[part] != null)
+        .map((part) => `${part.toUpperCase()}=${[schedule[part]].flat().join(",")}`)
+        .join(";")
+}
+
 /** @param {any} job @returns {object} */
 function draftFromJob(job) {
     return {
@@ -865,7 +951,9 @@ function draftFromJob(job) {
         schedule: {
             ...job.schedule,
             onText: Array.isArray(job.schedule.on) ? job.schedule.on.join(",") : "",
+            ruleText: job.schedule.kind == "rrule" ? recurrenceText(job.schedule) : "",
         },
+        missedRuns: job.missedRuns ?? "runOnce",
         activation: { ...job.activation },
         workingDirectory: job.workingDirectory,
         environment: {
@@ -888,8 +976,37 @@ function draftFromJob(job) {
  * @returns {object}
  */
 function draftToJob(draft) {
-    const schedule = { ...draft.schedule }
+    let schedule = { ...draft.schedule }
     delete schedule.onText
+    delete schedule.ruleText
+    if (schedule.kind == "rrule") {
+        // the daemon reads the text form itself; keep the fields the rule text does not carry
+        const { timeZone, start, count, until } = schedule
+        schedule = { timeZone, start, count, until }
+        for (const piece of String(draft.schedule.ruleText ?? "").replace(/^rrule:/i, "").split(";")) {
+            const [name, value] = piece.split("=").map((text) => (text ?? "").trim())
+            if (!name) {
+                continue
+            }
+            const key = name.toLowerCase()
+            if (key == "freq") {
+                schedule.freq = value.toUpperCase()
+            } else if (key == "interval") {
+                schedule.interval = Number(value)
+            } else if (key == "byday") {
+                schedule.byday = value.split(",")
+            } else {
+                schedule[key] = value.split(",").map(Number)
+            }
+        }
+        schedule.kind = "rrule"
+    }
+    if (schedule.kind == "keepAlive" || schedule.kind == "manual") {
+        schedule = { kind: schedule.kind }
+    } else {
+        schedule.count = schedule.count === "" || schedule.count == null ? undefined : Number(schedule.count)
+        schedule.until = schedule.until || undefined
+    }
     if (schedule.kind == "weekly") {
         schedule.on = String(draft.schedule.onText ?? "").split(",").map((piece) => piece.trim()).filter(
             Boolean,
@@ -923,6 +1040,7 @@ function draftToJob(draft) {
         runAs: draft.runAs || null,
         timeout: draft.timeout || null,
         overlap: draft.overlap,
+        missedRuns: draft.missedRuns ?? "runOnce",
         onFailure: {
             retries: Number(draft.onFailure.retries ?? 0),
             backoff: { ...draft.onFailure.backoff },

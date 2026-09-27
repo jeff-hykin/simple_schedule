@@ -130,7 +130,13 @@ export function durationChart(runs) {
     const barWidth = Math.max(2, Math.min(20, slotWidth - 3))
     const colorFor = (
         status,
-    ) => (status == "success" ? "var(--green)" : status == "timeout" ? "var(--yellow)" : "var(--red)")
+    ) => (status == "success"
+        ? "var(--green)"
+        : status == "timeout"
+        ? "var(--yellow)"
+        : status == "stopped"
+        ? "var(--text-faint)"
+        : "var(--red)")
     points.forEach((run, index) => {
         const barHeight = Math.max(1, run.durationMs * scale)
         svg.append(svgElement(

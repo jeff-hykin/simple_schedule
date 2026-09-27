@@ -21,6 +21,7 @@ import {
     runsFor,
     skipNextRuns,
     statsFor,
+    stopJob,
     triggerJob,
 } from "../operations.js"
 
@@ -182,6 +183,12 @@ async function handleRequest(request) {
             }
             if (action == "trigger" && request.method == "POST") {
                 return jsonResponse(await triggerJob(id, { wait: url.searchParams.get("wait") != "false" }))
+            }
+            if (action == "restart" && request.method == "POST") {
+                return jsonResponse(await stopJob(id, { restart: true }))
+            }
+            if (action == "stop" && request.method == "POST") {
+                return jsonResponse(await stopJob(id))
             }
             if (action == "skip" && request.method == "POST") {
                 const body = await readJsonBody(request)
